@@ -1,7 +1,8 @@
 streamlit==1.20.0
 streamlit-drawable-canvas
 Pillow
-numpy
-setuptools  # <-- This installs distutils
+numpy==1.24.3  # Use an older, more stable version
+pandas==1.5.3  # Ensures compatibility with older numpy
+setuptools
 
 
