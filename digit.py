@@ -1,12 +1,16 @@
 import streamlit as st
+import streamlit.elements.image as st_image
+from io import BytesIO
+import base64
+import streamlit_drawable_canvas as sdc
+from streamlit_drawable_canvas import st_canvas
+from PIL import Image
+import numpy as np
 
 ##################################################
 # 1) MONKEY-PATCH THE REMOVED FUNCTION
 #    (Needed for Streamlit 1.20+)
 ##################################################
-import streamlit.elements.image as st_image
-from io import BytesIO
-import base64
 
 def image_to_url(
     image, width=None, clamp=False, channels="RGB", output_format="auto", image_id=None
@@ -29,10 +33,6 @@ st_image.image_to_url = image_to_url
 ##################################################
 # 2) IMPORTS + DISABLE RESIZING
 ##################################################
-import streamlit_drawable_canvas as sdc
-from streamlit_drawable_canvas import st_canvas
-from PIL import Image
-import numpy as np
 
 # Disable resizing in streamlit-drawable-canvas
 def _dummy_resize_img(img, new_height, new_width):
@@ -60,6 +60,9 @@ if uploaded_file is not None:
     st.image(image_pil, caption="Preview of uploaded image")
     orig_width, orig_height = image_pil.size
     st.write(f"Image Mode: {image_pil.mode}, Size: {image_pil.size}")
+
+    # Convert image to URL
+    image_url = image_to_url(image_pil)
 
     # Decide canvas size
     canvas_width = min(orig_width, 1000)
@@ -90,7 +93,7 @@ if uploaded_file is not None:
         stroke_width=5,
         stroke_color="#FF0000",
         background_color="#FFFFFF",  # Solid white behind the image
-        background_image=image_pil,  # The PIL image as background
+        background_image=Image.open(BytesIO(base64.b64decode(image_url.split(",")[1]))),  # The PIL image as background
         update_streamlit=True,
         width=canvas_width,
         height=canvas_height,
