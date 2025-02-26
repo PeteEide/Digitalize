@@ -12,62 +12,71 @@ def image_to_url(
     image, width=None, clamp=False, channels="RGB", output_format="auto", image_id=None
 ):
     """
-    Replacement for the removed `streamlit.elements.image.image_to_url` function.
-    Converts a PIL image to a data URL so it can be displayed as a background in st_canvas.
+    Replacement for the removed `streamlit.elements.image.image_to_url`.
+    Converts a PIL image to a data URL so st_canvas can display it internally.
     """
     if output_format == "auto":
-        output_format = "PNG"  # Default to PNG if unspecified
-
-    buffered = BytesIO()
-    image.save(buffered, format=output_format)
-    b64_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        output_format = "PNG"
+    buf = BytesIO()
+    image.save(buf, format=output_format)
+    b64_str = base64.b64encode(buf.getvalue()).decode("utf-8")
     mime_type = f"image/{output_format.lower()}"
     return f"data:{mime_type};base64,{b64_str}"
 
-# Apply the patch *before* importing st_canvas
+# Patch image_to_url BEFORE importing st_canvas
 st_image.image_to_url = image_to_url
-
 
 ##################################################
 # 2) IMPORTS
 ##################################################
+# We'll also monkey-patch `_resize_img` to disable resizing checks.
+import streamlit_drawable_canvas as sdc
 from streamlit_drawable_canvas import st_canvas
 from PIL import Image
 import numpy as np
 
+# Monkey-patch the internal resize function so if
+# background_image is a PIL image, it won't crash or resize incorrectly.
+def _dummy_resize_img(img, new_height, new_width):
+    # Return the image unmodified
+    return img
+
+sdc._resize_img = _dummy_resize_img
+
+##################################################
+# 3) STREAMLIT APP
+##################################################
 st.set_page_config(page_title="Digitize Graph (3 Points)", layout="wide")
 st.title("Digitize a Graph from an Image (3 Reference Points)")
 
-##################################################
-# 3) FILE UPLOADER
-##################################################
 uploaded_file = st.file_uploader(
-    "Upload a graph image (PNG/JPG)", 
+    "Upload a graph image (PNG/JPG)",
     type=["png", "jpg", "jpeg"]
 )
 
-if uploaded_file is not None:
-    # Load the image with PIL
-    image = Image.open(uploaded_file)
+if uploaded_file:
+    # Load the image in RGBA mode
+    image_pil = Image.open(uploaded_file).convert("RGBA")
 
-    # 3a) Display raw image just to confirm it's loaded
-    st.image(image, caption="Preview of uploaded image")
+    # Show the raw PIL image as a preview
+    st.image(image_pil, caption="Preview of uploaded image")
 
-    # Original size
-    orig_width, orig_height = image.size
+    orig_width, orig_height = image_pil.size
 
-    # We'll clamp the canvas to a maximum size so it's not huge
-    canvas_width = min(orig_width, 800)
-    canvas_height = min(orig_height, 600)
+    st.write(f"Image Mode: {image_pil.mode}, Size: {image_pil.size}")
+
+    # Decide canvas size
+    canvas_width = min(orig_width, 1000)
+    canvas_height = min(orig_height, 800)
 
     st.write("**Instructions**:")
     st.markdown("""
     1. **Click 3 points** on the image to define your coordinate system:
        - **First click** → Real coords **(0, 0)**
        - **Second click** → Real coords **(maxX, 0)**
-       - **Third click** → Real coords **(0, maxY)**
-    2. Enter your numeric **maxX** and **maxY** below.
-    3. **Click** as many additional points (circles) as you want to digitize.
+       - **Third click** → Real coords **(0, maxY)**  
+    2. Enter your numeric **maxX** and **maxY** below.  
+    3. **Click** as many additional points (circles) as you want to digitize.  
     4. Press **Digitize** to see the transformed coordinates.
     """)
 
@@ -84,64 +93,40 @@ if uploaded_file is not None:
         fill_color="rgba(255, 165, 0, 0.3)",
         stroke_width=5,
         stroke_color="#FF0000",
-        background_image=image,          # pass the PIL Image
+        background_color="#FFFFFF",  # White behind the PIL image
+        background_image=image_pil,  # Pass our PIL image
         update_streamlit=True,
-        height=canvas_height,
         width=canvas_width,
-        drawing_mode="point",            # each click -> a small circle
+        height=canvas_height,
+        drawing_mode="point",
         point_display_radius=5,
         key="canvas",
     )
 
-    ##################################################
-    # 5) DIGITIZE BUTTON
-    ##################################################
+    # DIGITIZE BUTTON
     if st.button("Digitize"):
         if canvas_result.json_data is None:
             st.error("No canvas data. Please click on the image first.")
         else:
-            # Get the circles from JSON
-            objects = canvas_result.json_data["objects"] or []
+            objects = canvas_result.json_data.get("objects", [])
             circles = [obj for obj in objects if obj["type"] == "circle"]
 
             if len(circles) < 3:
                 st.error("You need at least 3 points for reference!")
             else:
-                # First 3 points = reference corners
-                # We'll define a helper to extract circle centers
                 def circle_center(c):
-                    return (
-                        c["left"] + c["radius"],
-                        c["top"]  + c["radius"]
-                    )
+                    # center = (left + radius, top + radius)
+                    return (c["left"] + c["radius"], c["top"] + c["radius"])
 
-                ref1 = circles[0]
-                ref2 = circles[1]
-                ref3 = circles[2]
+                # First 3 circles → reference corners
+                ref1, ref2, ref3 = circles[:3]
+                p1 = np.array(circle_center(ref1))  # (0,0)
+                p2 = np.array(circle_center(ref2))  # (maxX,0)
+                p3 = np.array(circle_center(ref3))  # (0,maxY)
 
-                p1x, p1y = circle_center(ref1)  # maps to (0,0)
-                p2x, p2y = circle_center(ref2)  # maps to (maxX,0)
-                p3x, p3y = circle_center(ref3)  # maps to (0,maxY)
-
-                # The rest are data points
-                data_circles = circles[3:]
-
-                # Convert to NumPy for matrix math
-                p1 = np.array([p1x, p1y])
-                p2 = np.array([p2x, p2y])
-                p3 = np.array([p3x, p3y])
-
-                # We want T such that:
-                # T(p1) = (0,0)
-                # T(p2) = (max_x, 0)
-                # T(p3) = (0, max_y)
-                #
-                # Let M be a 2x2 matrix, and we first shift by p1:
-                # T(p) = M*(p - p1).
-                #
-                # Then M*(p2 - p1) = (max_x, 0)
-                #      M*(p3 - p1) = (0, max_y)
-
+                # We want an affine transform M so that:
+                #  M*(p2-p1) = (max_x, 0)
+                #  M*(p3-p1) = (0, max_y)
                 v12 = p2 - p1
                 v13 = p3 - p1
 
@@ -150,8 +135,8 @@ if uploaded_file is not None:
                     [v12[1], v13[1]]
                 ])
                 real_mat = np.array([
-                    [max_x,    0],
-                    [0,    max_y]
+                    [max_x, 0],
+                    [0,     max_y]
                 ])
 
                 try:
@@ -161,22 +146,22 @@ if uploaded_file is not None:
                     st.error("Reference points appear collinear or invalid. Cannot invert matrix.")
                     st.stop()
 
-                # Transform each data point
+                # Transform subsequent circles
                 digitized_points = []
-                for c in data_circles:
+                for c in circles[3:]:
                     cx, cy = circle_center(c)
                     p = np.array([cx, cy])
-                    real_xy = M @ (p - p1)  # affine transform
+                    real_xy = M @ (p - p1)
                     digitized_points.append(real_xy)
 
                 st.success("Digitization complete!")
                 st.write("**Transformed Points (x, y):**")
-                # Display in a small table
+                rows = [
+                    f"| {i+1} | {pt[0]:.3f} | {pt[1]:.3f} |"
+                    for i, pt in enumerate(digitized_points)
+                ]
                 st.markdown(
                     "| Index |    X    |    Y    |\n"
-                    "|-------|---------|---------|\n" +
-                    "\n".join(
-                        f"| {i+1}    | {pt[0]:.3f} | {pt[1]:.3f} |"
-                        for i, pt in enumerate(digitized_points)
-                    )
+                    "|-------|---------|---------|\n"
+                    + "\n".join(rows)
                 )
